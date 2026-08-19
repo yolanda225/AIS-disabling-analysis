@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN") # stored in .env file
+CMEMS_USERNAME = os.getenv("CMEMS_USERNAME") # stored in .env file
+CMEMS_PASSWORD = os.getenv("CMEMS_PASSWORD") # stored in .env file
 
 PERIODS = {
     "2017_2019": ("2017-01-01", "2019-12-31"),
