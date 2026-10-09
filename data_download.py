@@ -155,23 +155,23 @@ async def download_fishing_effort_gridded(start_date, end_date, outfile, spatial
             datasets=["public-global-fishing-effort:latest"],
             spatial_resolution=spatial_resolution,
             temporal_resolution="ENTIRE",
-            group_by="GEARTYPE",
+            group_by="FLAGANDGEARTYPE",
             spatial_aggregation=False,
             start_date=year_start.strftime("%Y-%m-%d"),
             end_date=year_end.strftime("%Y-%m-%d"),
             geojson=GLOBAL_GEOJSON,
         )
-        df_year = result.df()[['lat', 'lon', 'gear_type', 'hours']]  # keep only needed columns
+        df_year = result.df()[['lat', 'lon', 'flag', 'gear_type', 'hours']]  # keep only needed columns
         df_year['lat'] = df_year['lat'].astype('float32')
         df_year['lon'] = df_year['lon'].astype('float32')
         df_year['hours'] = df_year['hours'].astype('float32')
         print(f"{year_start.date()} - {year_end.date()}: {len(df_year)} rows")
 
         if running is None:
-            running = df_year.groupby(['lat', 'lon', 'gear_type'], as_index=False)['hours'].sum()
+            running = df_year.groupby(['lat', 'lon', 'flag', 'gear_type'], as_index=False, dropna=False)['hours'].sum()
         else:
             running = pd.concat([running, df_year], ignore_index=True)
-            running = running.groupby(['lat', 'lon', 'gear_type'], as_index=False)['hours'].sum()
+            running = running.groupby(['lat', 'lon', 'flag', 'gear_type'], as_index=False, dropna=False)['hours'].sum()
 
         del df_year, result  # free memory
         import gc; gc.collect()
