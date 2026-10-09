@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 import xgboost as xgb
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.metrics import log_loss, roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 
 
@@ -46,33 +46,39 @@ def build_presence_absence(gaps_df, fishing_df, res=0.25, seed=42, gear_type=Non
             Defaults to None (all gear types).
 
     Returns:
-        pandas.DataFrame: One row per cell, with 'lon', 'lat', and a 'presence'
-            column (1 or 0).
+        pandas.DataFrame: One row per sampled event, with 'lon', 'lat', and a 'presence'
+        column (1 or 0).
     """
     if gear_type is not None:
         gaps_df = gaps_df[gaps_df['gear_type'].str.upper() == gear_type.upper()]
         fishing_df = fishing_df[fishing_df['gear_type'].str.upper() == gear_type.upper()]
 
     gaps_df = gaps_df.copy()
-    gaps_df['position'] = gaps_df['position'].apply(lambda p: p if isinstance(p, dict) else ast.literal_eval(p))
-    gaps_lat = gaps_df['position'].apply(lambda p: p['lat']).values
-    gaps_lon = gaps_df['position'].apply(lambda p: p['lon']).values
+    if 'gap' in gaps_df:
+        off = gaps_df['gap'].apply(lambda g: (g if isinstance(g, dict) else ast.literal_eval(g))['off_position'])
+        gaps_df['lon'], gaps_df['lat'] = off.str['lon'], off.str['lat']
 
-    lon_c, lat_c = cell_center(gaps_lon, gaps_lat, res)
-    presence_cells = set(zip(lon_c, lat_c))
+    lon_c, lat_c = cell_center(gaps_df['lon'].values, gaps_df['lat'].values, res)
+    presence_events = list(zip(lon_c, lat_c))  # one entry per event
+    presence_cells = set(presence_events)
 
     lon_f, lat_f = cell_center(fishing_df['lon'].values, fishing_df['lat'].values, res)
-    fishing_cells = set(zip(lon_f, lat_f))
-
-    candidate_absences = list(fishing_cells - presence_cells)
-    print("Number of presences vs absences: ", len(presence_cells), len(candidate_absences))
+    # one absence row per cell x gear x flag, so cells fished by many fleets are drawn more often
+    cols = [c for c in ('gear_type', 'flag') if c in fishing_df]
+    rows = pd.DataFrame({'lon': lon_f, 'lat': lat_f, **{c: fishing_df[c].values for c in cols}}).drop_duplicates()
+    fishing_rows = list(zip(rows['lon'], rows['lat']))
 
     rng = np.random.default_rng(seed)
-    n = min(len(presence_cells), len(candidate_absences))
+    n = min(len(presence_cells), sum(c not in presence_cells for c in fishing_rows))
+    # sample events
+    presence_idx = rng.choice(len(presence_events), size=n, replace=False)
+    sampled = {presence_events[i] for i in presence_idx}
+    candidate_absences = [c for c in fishing_rows if c not in presence_cells]  # absences: no disabling events
+    print("Number of presence cells vs absence rows: ", len(presence_cells), len(candidate_absences))
     absence_idx = rng.choice(len(candidate_absences), size=n, replace=False)
     absence_cells = [candidate_absences[i] for i in absence_idx]
 
-    presence_df = pd.DataFrame(list(presence_cells)[:n], columns=['lon', 'lat'])
+    presence_df = pd.DataFrame([presence_events[i] for i in presence_idx], columns=['lon', 'lat'])
     presence_df['presence'] = 1
     absence_df = pd.DataFrame(absence_cells, columns=['lon', 'lat'])
     absence_df['presence'] = 0
@@ -179,11 +185,7 @@ def rebalance_1to1(df, seed=42):
         pandas.DataFrame: A balanced subset of df.
     """
     n = df['presence'].value_counts().min()
-    return (
-        df.groupby('presence', group_keys=False)
-        .apply(lambda g: g.sample(n, random_state=seed))
-        .reset_index(drop=True)
-    )
+    return df.groupby('presence').sample(n, random_state=seed).reset_index(drop=True)  # apply() drops 'presence' in pandas 3
 
 
 def explained_deviance(y_true, y_pred_proba):
@@ -200,36 +202,6 @@ def explained_deviance(y_true, y_pred_proba):
     null_pred = np.full_like(y_true, y_true.mean(), dtype=float)
     null_dev = 2 * log_loss(y_true, null_pred, normalize=False)
     return (null_dev - model_dev) / null_dev * 100
-
-
-def tune_learning_rate(X, y, seed=42, lr_grid=(0.1, 0.05, 0.01, 0.005, 0.001), min_trees=1000, max_trees=10000):
-    """Pick the largest learning rate whose early-stopped tree count reaches min_trees.
-
-    Args:
-        X (pandas.DataFrame): Feature matrix.
-        y (pandas.Series): 0/1 presence labels.
-        seed (int, optional): Random seed for the train/validation split. Defaults to 42.
-        lr_grid (tuple, optional): Learning rates to try, high to low. Defaults to
-            (0.1, 0.05, 0.01, 0.005, 0.001).
-        min_trees (int, optional): Minimum acceptable early-stopped tree count.
-            Defaults to 1000.
-        max_trees (int, optional): Upper bound passed to early stopping. Defaults to
-            10000.
-
-    Returns:
-        tuple[float, int]: (learning_rate, n_trees) for the first lr_grid value that
-            reached min_trees, or the last one tried if none did.
-    """
-    X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.25, random_state=seed, stratify=y)
-    for lr in lr_grid:
-        clf = xgb.XGBClassifier(n_estimators=max_trees, max_depth=3, learning_rate=lr,
-                                 subsample=0.6, eval_metric="logloss", random_state=seed,
-                                 early_stopping_rounds=50)
-        clf.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-        n_trees = clf.best_iteration + 1
-        if n_trees >= min_trees:
-            return lr, n_trees
-    return lr_grid[-1], n_trees  # smallest lr still short of min_trees; use what we got
 
 
 def fit_brt(model_df, feature_cols, n_iter=50, seed=42, **xgb_params):
@@ -252,38 +224,31 @@ def fit_brt(model_df, feature_cols, n_iter=50, seed=42, **xgb_params):
     X = model_df[feature_cols]
     y = model_df["presence"]
 
-    learning_rate, n_trees = tune_learning_rate(X, y, seed=seed)
-    print(f"Tuned learning_rate={learning_rate} -> {n_trees} trees")
-
+    learning_rate = 0.001 if (y == 1).sum() < 500 else 0.01
     params = dict(
-        n_estimators=max(n_trees, 1000),
-        max_depth=3,
+        n_estimators=2000,
+        max_depth=0, grow_policy="lossguide", max_leaves=4,
         learning_rate=learning_rate,
         subsample=0.6,
         eval_metric="logloss",
         random_state=seed,
-        importance_type="total_gain",   # <- add this
+        importance_type="total_gain",
     )
     params.update(xgb_params)
 
+    # paper evaluates AUC/TSS on distinct presence cells
+    cv_df = rebalance_1to1(model_df.drop_duplicates(['lon', 'lat', 'presence']), seed)
     aucs, tss_scores = [], []
     for i in range(n_iter):
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, random_state=seed + i, stratify=y
+            cv_df[feature_cols], cv_df["presence"], test_size=0.25, random_state=seed + i, stratify=cv_df["presence"]
         )
         clf = xgb.XGBClassifier(**{**params, "random_state": seed + i})
         clf.fit(X_train, y_train)
         preds = clf.predict_proba(X_test)[:, 1]
         aucs.append(roc_auc_score(y_test, preds))
-
-        pred_labels = (preds >= 0.5).astype(int)
-        tp = ((pred_labels == 1) & (y_test == 1)).sum()
-        tn = ((pred_labels == 0) & (y_test == 0)).sum()
-        fp = ((pred_labels == 1) & (y_test == 0)).sum()
-        fn = ((pred_labels == 0) & (y_test == 1)).sum()
-        sensitivity = tp / (tp + fn)
-        specificity = tn / (tn + fp)
-        tss_scores.append(sensitivity + specificity - 1)
+        fpr, tpr, _ = roc_curve(y_test, preds)
+        tss_scores.append((tpr - fpr).max())
 
     # final model trained on all data
     final_model = xgb.XGBClassifier(**params)
@@ -302,13 +267,14 @@ def fit_brt(model_df, feature_cols, n_iter=50, seed=42, **xgb_params):
     return final_model, metrics
 
 
-def plot_importance(model, feature_cols, title="Feature importance"):
+def plot_importance(model, feature_cols, title="Feature importance", outfile=None):
     """Plot a fitted model's feature importances as a bar chart.
 
     Args:
         model (xgboost.XGBClassifier): A fitted model.
         feature_cols (list[str]): Column names, in the same order used to fit model.
         title (str, optional): Plot title. Defaults to "Feature importance".
+        outfile (str, optional): If given, plot is saved here. Defaults to None.
 
     Returns:
         None: Displays the plot.
@@ -318,6 +284,8 @@ def plot_importance(model, feature_cols, title="Feature importance"):
     plt.barh([feature_cols[i] for i in order], importances[order])
     plt.title(title)
     plt.gca().invert_yaxis()
+    if outfile:
+        plt.savefig(outfile, dpi=150, bbox_inches="tight")
     plt.show()
 
 
@@ -347,6 +315,7 @@ def run_model(gaps_df, fishing_df, feature_cols, raster_paths, gear_type=None, o
     # loitering_hours: NaN = no loitering recorded = 0 hours, not missing data
     model_df['loitering_hours'] = model_df['loitering_hours'].fillna(0)
     model_df = model_df.dropna(subset=[c for c in feature_cols if c != 'loitering_hours'])
+    model_df = model_df[model_df['dist2coast'] > 92.6]  # >50nm offshore
     model_df = rebalance_1to1(model_df)
 
     model, metrics = fit_brt(model_df, feature_cols)
@@ -361,8 +330,7 @@ def run_model(gaps_df, fishing_df, feature_cols, raster_paths, gear_type=None, o
     with open(f"{outdir}/importance_{label}.json", "w") as f:
         json.dump(importance_dict, f, indent=2)
 
-    plot_importance(model, feature_cols, title=f"{label} feature importance")
-    plt.savefig(f"{outdir}/importance_{label}.png", dpi=150, bbox_inches="tight")
+    plot_importance(model, feature_cols, title=f"{label} feature importance", outfile=f"{outdir}/importance_{label}.png")
     plt.close()
 
     print(f"Saved metrics + importance for '{label}' -> {outdir}")
