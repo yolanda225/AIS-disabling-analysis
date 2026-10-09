@@ -83,11 +83,14 @@ def process_sst_chl():
     """
     for variable, period in [("sst", "2017_2019"), ("sst", "2023_2025"),
                                ("chl", "2017_2019"), ("chl", "2023_2025")]:
-        ds = xr.load_dataset(f"{RAW_DIR}/{variable}_{period}.nc")
+        # chunks instead of whole sst file
+        ds = xr.open_dataset(f"{RAW_DIR}/{variable}_{period}.nc", chunks={"time": 50})
         da_mean = ds[variable].mean(dim="time", skipna=True)
         if variable == "chl":
             da_mean = np.log10(da_mean)
+        da_mean = da_mean.compute()
         save_raster(da_mean, f"{OUT_DIR}/{variable}_{period}.tif")
+        ds.close()
 
 
 def process_sst_variability(period):
@@ -99,10 +102,12 @@ def process_sst_variability(period):
     Returns:
         None: Writes sst_variability_{period}.tif to OUT_DIR.
     """
-    ds = xr.load_dataset(f"{RAW_DIR}/sst_{period}.nc")
+    ds = xr.open_dataset(f"{RAW_DIR}/sst_{period}.nc", chunks={"time": 50})
     da_mean = ds["sst"].std(dim="time", skipna=True, ddof=1)
+    da_mean = da_mean.compute()
 
     save_raster(da_mean, f"{OUT_DIR}/sst_variability_{period}.tif")
+    ds.close()
 
 
 if __name__ == "__main__":

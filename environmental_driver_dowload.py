@@ -5,7 +5,6 @@ from the Copernicus Marine Service (CMEMS).
 import gc
 import os
 
-import numpy as np
 import pandas as pd
 import xarray as xr
 import copernicusmarine
@@ -45,11 +44,13 @@ def download_sst(period, res=0.25):
         None: Writes sst_{period}.nc to OUTPUT_DIR.
     """
     start_date, end_date = PERIODS[period]
-    lon_t = np.arange(-180 + res / 2, 180, res)
-    lat_t = np.arange(-90 + res / 2, 90, res)
+    native_res = 0.05
+    factor = round(res / native_res)
     chunk_file = f"{OUTPUT_DIR}/_sst_chunk.nc"
+    out_file = f"{OUTPUT_DIR}/sst_{period}.nc"
+    
+    temp_files = []
 
-    month_files = []
     for i, (chunk_start, chunk_end) in enumerate(month_chunks(start_date, end_date)):
         copernicusmarine.subset(
             dataset_id="METOFFICE-GLO-SST-L4-REP-OBS-SST",
@@ -66,23 +67,29 @@ def download_sst(period, res=0.25):
             password=CMEMS_PASSWORD,
         )
 
-        with xr.open_dataset(chunk_file, chunks={"time": 5}) as ds:
-            da = (ds.analysed_sst - 273.15).interp(  # K -> degC, 0.05deg -> 0.25deg
-                longitude=lon_t, latitude=lat_t, method="linear"
-            )
-            month_file = f"{OUTPUT_DIR}/_sst_{period}_{i:02d}.nc"
-            da.to_dataset(name="sst").to_netcdf(month_file)
-            month_files.append(month_file)
+        with xr.open_dataset(chunk_file, chunks={"time": 1}) as ds:
+            da = (ds.analysed_sst - 273.15).astype("float32")
+            da = da.coarsen(longitude=factor, latitude=factor, boundary="exact").mean()
+            da = da.astype("float32").compute()
+            month_ds = da.to_dataset(name="sst")
+            
+            # save to temporary per-month file
+            temp_out = f"{OUTPUT_DIR}/_sst_temp_{chunk_start}.nc"
+            month_ds.to_netcdf(temp_out)
+            temp_files.append(temp_out)
 
         os.remove(chunk_file)
-        gc.collect()  # nudge Python to actually release this month's arrays
+        gc.collect()
         print(f"sst {period}: downloaded through {chunk_end}")
 
-    with xr.open_mfdataset(month_files, combine="by_coords") as sst_full:
-        sst_full.to_netcdf(f"{OUTPUT_DIR}/sst_{period}.nc")
-
-    for month_file in month_files:
-        os.remove(month_file)
+    # put the temporary chunks into one NetCDF file
+    print(f"Combining temporary files into {out_file}...")
+    with xr.open_mfdataset(temp_files, combine="nested", concat_dim="time") as full_ds:
+        full_ds.to_netcdf(out_file)
+        
+    # clean up
+    for f in temp_files:
+        os.remove(f)
 
 
 def download_chl(period):
