@@ -166,7 +166,7 @@ def get_raster_paths(period):
         "loitering_hours": f"data/processed/loitering_hours_{period}.tif",
         "dist2coast": "data/processed/dist2coast.tif",
         "dist_mpa": "data/processed/mpa_distance_combined.tif",
-        "dist_piracy": "data/processed/asam_distance.tif",
+        "dist_piracy": f"data/processed/asam_distance_{period}.tif",
         "chl": f"data/processed/chl_{period}.tif",
         "sst": f"data/processed/sst_{period}.tif",
         "sst_var": f"data/processed/sst_variability_{period}.tif",
