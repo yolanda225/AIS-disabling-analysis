@@ -329,6 +329,8 @@ def run_model(gaps_df, fishing_df, feature_cols, raster_paths, gear_type=None, o
 
     with open(f"{outdir}/importance_{label}.json", "w") as f:
         json.dump(importance_dict, f, indent=2)
+    model.save_model(f"{outdir}/model_{label}.json") # for partial dependence plots
+    model_df.to_csv(f"{outdir}/model_df_{label}.csv", index=False)
 
     plot_importance(model, feature_cols, title=f"{label} feature importance", outfile=f"{outdir}/importance_{label}.png")
     plt.close()
