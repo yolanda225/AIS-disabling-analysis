@@ -12,6 +12,7 @@ import rasterio
 from shapely import segmentize
 import pandas as pd
 
+from config import PERIODS
 from raster_utils import distance_to_nearest_point_raster, write_raster
 
 RES = 0.25
@@ -50,13 +51,13 @@ def load_mpa_boundary_points(zip_path):
     return mpa_points[:, [1, 0]]  # reorder (lon, lat) -> (lat, lon)
 
 
-def load_piracy_points(zip_path, shapefile_path):
-    """Piracy event points (ASAM), restricted to <= Dec 2019 to match the paper's
-    data
+def load_piracy_points(zip_path, shapefile_path, end_date):
+    """Piracy event points (ASAM) from the start of the record up to end_date
 
     Args:
         zip_path (str): Path to the ASAM shapefile zip archive.
         shapefile_path (str): zip:// path to the .shp file within zip_path.
+        end_date (str): Last incident date to include ("YYYY-MM-DD").
 
     Returns:
         numpy.ndarray: [N, 2] array of [lat, lon] piracy event points.
@@ -67,7 +68,7 @@ def load_piracy_points(zip_path, shapefile_path):
     df = gpd.read_file(shapefile_path, columns=["dateofocc"])  # geometry + incident date
 
     df["dateofocc"] = pd.to_datetime(df["dateofocc"])
-    df = df[df["dateofocc"] <= "2019-12-31"]
+    df = df[df["dateofocc"] <= end_date]
 
     asam_points = np.column_stack([df.geometry.y, df.geometry.x]).astype("float32")  # already [lat, lon]
 
@@ -129,19 +130,20 @@ def process_mpa_distance(zip_paths, chunk_outfiles, combined_outfile, res=RES):
     plt.show()
 
 
-def process_piracy_distance(zip_path, shapefile_path, outfile, res=RES):
+def process_piracy_distance(zip_path, shapefile_path, outfile, end_date, res=RES):
     """Build a distance-to-nearest-piracy-event raster.
 
     Args:
         zip_path (str): Path to the ASAM shapefile zip archive.
         shapefile_path (str): zip:// path to the .shp file within zip_path.
         outfile (str): Output path for the distance raster.
+        end_date (str): Last incident date to include ("YYYY-MM-DD").
         res (float, optional): Grid resolution in degrees. Defaults to RES.
 
     Returns:
         None: Writes outfile.
     """
-    points = load_piracy_points(zip_path, shapefile_path)
+    points = load_piracy_points(zip_path, shapefile_path, end_date)
     dist_raster = distance_to_nearest_point_raster(points, res=res, cap_km=400)
     write_raster(dist_raster, outfile, res=res)
 
@@ -163,8 +165,10 @@ if __name__ == "__main__":
     #     "data/processed/mpa_distance_combined.tif",
     # )
 
-    process_piracy_distance(
-        "data/raw/driver_data/piracy/ASAM_shp.zip",
-        "zip://data/raw/driver_data/piracy/ASAM_shp.zip!Asam_data_download/All ASAM Events.shp",
-        "data/processed/asam_distance.tif",
-    )
+    for period, (start, end) in PERIODS.items():  # one raster per period: all incidents up to its end
+        process_piracy_distance(
+            "data/raw/driver_data/piracy/ASAM_shp.zip",
+            "zip://data/raw/driver_data/piracy/ASAM_shp.zip!Asam_data_download/All ASAM Events.shp",
+            f"data/processed/asam_distance_{period}.tif",
+            end_date=end,
+        )
